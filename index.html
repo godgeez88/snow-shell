@@ -339,7 +339,9 @@ let _seed=Date.now()%2147483647; function pseudo(){ _seed=(_seed*16807)%21474836
 function initials(s){ return (s||'S').replace(/^https?:\/\//,'').replace(/^www\./,'')[0].toUpperCase(); }
 
 // ---------- boot ----------
-if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
+// remove any previously-installed service worker + its caches (they broke cold-start loads)
+if('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister())).catch(()=>{}); }
+if(window.caches){ caches.keys().then(ks=>ks.forEach(k=>caches.delete(k))).catch(()=>{}); }
 (function(){
   // content lives on Amit's PRIVATE Render host; this public shell carries no data.
   const CONTENT_BASE = 'https://snow-godgeez.onrender.com';
@@ -396,15 +398,29 @@ if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catc
       + '</div>';
     const go=()=>{ const v=document.getElementById('keyin').value.trim(); if(!v)return;
       try{ localStorage.setItem('snow-key',v); }catch(e){}
-      document.getElementById('loader').innerHTML='<div class="spinner"></div>';
-      load({key:v}).catch(()=>askKey('That key didn’t work. Check it and try again.')); };
+      connect({key:v}); };
     document.getElementById('keygo').onclick=go;
     document.getElementById('keyin').addEventListener('keydown',e=>{ if(e.key==='Enter')go(); });
     setTimeout(()=>document.getElementById('keyin').focus(),200);
   }
-  // key-only: try a remembered key, else prompt for it
-  const first = k ? load({key:k}) : Promise.reject(new Error('needs-key'));
-  first.catch(()=> askKey());
+  // patient loader: on a wrong/missing key -> ask; on a cold server -> wait and retry
+  function connect(cred){
+    document.getElementById('loader').innerHTML =
+      '<div style="display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;padding:0 30px">'
+      + '<div class="spinner"></div>'
+      + '<div id="wake" style="font-family:var(--mono);font-size:11.5px;color:var(--dim);line-height:1.6">Loading your library…</div></div>';
+    let tries = 0;
+    const attempt = ()=> load(cred).catch(e=>{
+      if(e && e.message==='needs-key') { askKey(cred && cred.key ? 'That key didn’t work. Check it and try again.' : null); return; }
+      tries++;
+      if(tries >= 12){ askKey('Server didn’t respond. Tap Connect to try again.'); return; }
+      const w = document.getElementById('wake');
+      if(w) w.textContent = 'Waking the server… first open can take up to a minute ('+tries+')';
+      return new Promise(r=>setTimeout(r, 5000)).then(attempt);
+    });
+    return attempt();
+  }
+  if(k) connect({key:k}); else askKey();
 })();
 
 let ITEMS_BY_ID={}, VIDEOS=[], FEED_ORDER=[];
