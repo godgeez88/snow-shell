@@ -422,8 +422,9 @@ if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catc
   }
   (async function boot(){
     var cached=await readCache();
-    if(cached){ launch(cached); refreshQuiet(); return; }     // instant + offline (already-synced device)
-    if(!tok()){ googleScreen(); return; }                      // first open on this device -> sign in
+    // launch instantly from cache when we have a token, or when offline (best-effort)
+    if(cached && (tok() || !navigator.onLine)){ launch(cached); if(tok()) refreshQuiet(); return; }
+    if(!tok()){ googleScreen(); return; }                      // online + not signed in -> sign in
     showLoading();
     try{ launch(await fetchContent(true)); }
     catch(e){ if(e && e.message==='needs-auth') googleScreen(); else showError(e && e.message); }
