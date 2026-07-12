@@ -339,88 +339,108 @@ let _seed=Date.now()%2147483647; function pseudo(){ _seed=(_seed*16807)%21474836
 function initials(s){ return (s||'S').replace(/^https?:\/\//,'').replace(/^www\./,'')[0].toUpperCase(); }
 
 // ---------- boot ----------
-// remove any previously-installed service worker + its caches (they broke cold-start loads)
-if('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister())).catch(()=>{}); }
-if(window.caches){ caches.keys().then(ks=>ks.forEach(k=>caches.delete(k))).catch(()=>{}); }
+// ---------- offline-first loader: no key, caches everything for offline use ----------
+const CONTENT_URL = 'https://snow-godgeez.onrender.com/content.json';
+const DATA_CACHE = 'snow-data-v1';
+const IMG_CACHE  = 'snow-img-v1';
+// register the offline worker (serves the app shell + images with no network)
+if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(function(){}); }
+
 (function(){
-  // content lives on Amit's PRIVATE Render host; this public shell carries no data.
-  const CONTENT_BASE = 'https://snow-godgeez.onrender.com';
-  // key travels in the install URL (?k=) once, then is remembered on-device
-  const u=new URL(location.href); let k=u.searchParams.get('k');
-  if(k){ try{ localStorage.setItem('snow-key',k); }catch(e){} u.searchParams.delete('k'); history.replaceState(null,'',u.pathname+u.hash); }
-  else { try{ k=localStorage.getItem('snow-key'); }catch(e){} }
-  const GOOGLE_CLIENT_ID = '332340925825-kvkcohsqmsm8vvr7s1osonieuu1dg9r9.apps.googleusercontent.com';
-  // load content using EITHER a Google ID token OR the on-device access key
-  function load(cred){
-    let url = CONTENT_BASE + '/content.json';
-    const opt = {cache:'no-cache', headers:{}};
-    if(cred && cred.token) opt.headers['authorization'] = 'Bearer '+cred.token;
-    else if(cred && cred.key) url += '?k='+encodeURIComponent(cred.key);
-    return fetch(url,opt)
-      .then(r=>{ if(r.status===401) throw new Error('needs-auth'); if(!r.ok) throw new Error('http '+r.status); return r.json(); })
-      .then(d=>{ DB=d; if(!S) S=loadState(); S.authed=true; initState(); afterLoad(); });
-  }
-  function signInScreen(msg){
-    document.getElementById('loader').innerHTML =
-      '<div style="max-width:300px;text-align:center;display:flex;flex-direction:column;gap:8px;align-items:center;padding:0 20px">'
-      + '<div class="holo" style="margin-bottom:16px">'+holo(72,true)+'</div>'
-      + '<div class="wm" style="font-size:40px;font-weight:800;letter-spacing:-.045em;display:flex;align-items:center;gap:2px">sn'+holo(34,true)+'w</div>'
-      + '<div style="font-size:12.5px;color:var(--mut);margin:6px 0 26px">'+(msg||'Sign in to load everything you’re learning.')+'</div>'
-      + '<div id="gbtnwrap" style="min-height:44px;display:flex;justify-content:center"></div>'
-      + '<div id="keyfallback" style="font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:20px;cursor:pointer">use an access key instead</div>'
-      + '</div>';
-    document.getElementById('keyfallback').onclick = askKey;
-    renderGoogle();
-  }
-  function renderGoogle(){
-    if(!(window.google && google.accounts && google.accounts.id)){ return setTimeout(renderGoogle, 300); }
-    google.accounts.id.initialize({
-      client_id: GOOGLE_CLIENT_ID,
-      callback: (resp)=>{
-        try{ localStorage.setItem('snow-gtoken', resp.credential); }catch(e){}
-        document.getElementById('loader').innerHTML='<div class="spinner"></div>';
-        load({token:resp.credential}).catch(()=>signInScreen('That account can’t open this app. Use amit@godgeez.com.'));
-      }
-    });
-    google.accounts.id.renderButton(document.getElementById('gbtnwrap'),
-      {theme:'filled_black', size:'large', shape:'pill', text:'continue_with', width:260});
-    google.accounts.id.prompt();
-  }
-  function askKey(msg){
-    document.getElementById('loader').innerHTML =
-      '<div style="max-width:280px;text-align:center;display:flex;flex-direction:column;gap:14px;align-items:center;padding:0 20px">'
-      + '<div class="holo">'+holo(52,true)+'</div>'
-      + '<div style="font-size:15px;font-weight:650">Access key</div>'
-      + '<div style="font-size:12.5px;color:var(--mut)">Enter your Snow access key. It stays on this device.</div>'
-      + '<input id="keyin" placeholder="access key" autocapitalize="off" autocorrect="off" '
-      + 'style="width:100%;background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:13px 14px;color:var(--ink);font-family:var(--mono);font-size:14px;outline:none">'
-      + '<button id="keygo" style="width:100%;background:var(--org);color:#000;font-weight:800;border:none;border-radius:12px;padding:13px;font-size:14px">Connect</button>'
-      + '</div>';
-    const go=()=>{ const v=document.getElementById('keyin').value.trim(); if(!v)return;
-      try{ localStorage.setItem('snow-key',v); }catch(e){}
-      connect({key:v}); };
-    document.getElementById('keygo').onclick=go;
-    document.getElementById('keyin').addEventListener('keydown',e=>{ if(e.key==='Enter')go(); });
-    setTimeout(()=>document.getElementById('keyin').focus(),200);
-  }
-  // patient loader: on a wrong/missing key -> ask; on a cold server -> wait and retry
-  function connect(cred){
+  function setWake(t){ var w=document.getElementById('wake'); if(w) w.textContent=t; }
+  function showLoading(){
     document.getElementById('loader').innerHTML =
       '<div style="display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;padding:0 30px">'
-      + '<div class="spinner"></div>'
+      + '<div class="holo">'+holo(56,true)+'</div><div class="spinner"></div>'
       + '<div id="wake" style="font-family:var(--mono);font-size:11.5px;color:var(--dim);line-height:1.6">Loading your library…</div></div>';
-    let tries = 0;
-    const attempt = ()=> load(cred).catch(e=>{
-      if(e && e.message==='needs-key') { askKey(cred && cred.key ? 'That key didn’t work. Check it and try again.' : null); return; }
-      tries++;
-      if(tries >= 12){ askKey('Server didn’t respond. Tap Connect to try again.'); return; }
-      const w = document.getElementById('wake');
-      if(w) w.textContent = 'Waking the server… first open can take up to a minute ('+tries+')';
-      return new Promise(r=>setTimeout(r, 5000)).then(attempt);
-    });
-    return attempt();
   }
-  if(k) connect({key:k}); else askKey();
+  function showError(msg){
+    document.getElementById('loader').innerHTML =
+      '<div class="empty">Couldn’t reach your library.<br><span style="font-size:10px">'+esc(msg||'')+'</span><br><br>'
+      + '<span style="font-size:12px;color:var(--org)" onclick="location.reload()">tap to retry</span></div>';
+  }
+  async function readCache(){
+    try{ var c=await caches.open(DATA_CACHE); var r=await c.match(CONTENT_URL); if(r) return await r.json(); }catch(e){}
+    return null;
+  }
+  async function fetchContent(withUI){
+    var tries=0;
+    while(true){
+      try{
+        var res=await fetch(CONTENT_URL,{cache:'no-store'});
+        if(!res.ok) throw new Error('http '+res.status);
+        try{ var c=await caches.open(DATA_CACHE); await c.put(CONTENT_URL, res.clone()); }catch(e){}
+        return await res.json();
+      }catch(e){
+        tries++; if(tries>=12) throw e;
+        if(withUI) setWake('Waking the server… first open can take up to a minute ('+tries+')');
+        await new Promise(function(r){setTimeout(r,5000);});
+      }
+    }
+  }
+  function launch(data){
+    DB=data; if(!S) S=loadState(); S.authed=true; initState(); afterLoad();
+    injectSyncBar(); offlineSync();
+  }
+  (async function boot(){
+    var cached=await readCache();
+    if(cached){ launch(cached); refreshQuiet(); }              // instant + offline
+    else {
+      showLoading();
+      try{ var data=await fetchContent(true); launch(data); }  // first ever open
+      catch(e){ showError(e && e.message); }
+    }
+  })();
+  async function refreshQuiet(){                                // silent update when online
+    try{ var res=await fetch(CONTENT_URL,{cache:'no-store'}); if(res.ok){ var c=await caches.open(DATA_CACHE); await c.put(CONTENT_URL,res.clone()); } }catch(e){}
+  }
+
+  // ---- slim top progress bar: caches every thumbnail for offline viewing ----
+  function injectSyncBar(){
+    var dev=document.getElementById('device'); if(!dev || document.getElementById('syncbar')) return;
+    var bar=document.createElement('div'); bar.id='syncbar';
+    bar.style.cssText='position:absolute;top:0;left:0;right:0;z-index:60;pointer-events:none;transition:opacity .6s';
+    bar.innerHTML='<div style="height:3px;background:rgba(255,122,47,.16)"><div id="sfill" style="height:100%;width:0%;background:var(--org);transition:width .4s"></div></div>'
+      +'<div id="slabel" style="position:absolute;top:7px;right:12px;font-family:var(--mono);font-size:9px;color:var(--org);background:rgba(0,0,0,.55);padding:2px 8px;border-radius:100px;letter-spacing:.04em"></div>';
+    dev.appendChild(bar);
+  }
+  function fmt(n){ return n.toLocaleString(); }
+  function setProgress(done,total){
+    var f=document.getElementById('sfill'), l=document.getElementById('slabel');
+    if(f) f.style.width=(total?Math.round(done/total*100):100)+'%';
+    if(l) l.textContent=fmt(done)+' / '+fmt(total)+' offline';
+  }
+  function finishProgress(){
+    var l=document.getElementById('slabel'); if(l) l.textContent='All offline ✓';
+    setTimeout(function(){ var b=document.getElementById('syncbar'); if(b){ b.style.opacity='0'; setTimeout(function(){ if(b) b.style.display='none'; },700); } }, 2000);
+  }
+  async function offlineSync(){
+    if(window.__snowSync) return; window.__snowSync=true;
+    var items=(DB&&DB.items)||[]; var total=items.length;
+    var cache; try{ cache=await caches.open(IMG_CACHE); }catch(e){ return; }
+    var have=new Set(); try{ (await cache.keys()).forEach(function(r){ have.add(r.url); }); }catch(e){}
+    var need=[]; var done=0;
+    for(var i=0;i<items.length;i++){
+      var it=items[i];
+      var url=it.vid ? ('https://i.ytimg.com/vi/'+it.vid+'/hqdefault.jpg') : (it.thumb||'');
+      if(!url){ done++; continue; }
+      if(have.has(url)){ done++; continue; }
+      need.push(url);
+    }
+    setProgress(done,total);
+    if(!need.length){ finishProgress(); return; }
+    var idx=0;
+    async function worker(){
+      while(idx<need.length){
+        var url=need[idx++];
+        try{ var res=await fetch(url,{mode:'no-cors'}); await cache.put(url,res); }catch(e){}
+        done++; if(done%10===0) setProgress(done,total);
+      }
+    }
+    var workers=[]; for(var w=0;w<6;w++) workers.push(worker());
+    await Promise.all(workers);
+    setProgress(total,total); finishProgress();
+  }
 })();
 
 let ITEMS_BY_ID={}, VIDEOS=[], FEED_ORDER=[];
