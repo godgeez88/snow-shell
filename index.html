@@ -393,21 +393,18 @@ if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catc
       + '<input id="keyin" placeholder="access key" autocapitalize="off" autocorrect="off" '
       + 'style="width:100%;background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:13px 14px;color:var(--ink);font-family:var(--mono);font-size:14px;outline:none">'
       + '<button id="keygo" style="width:100%;background:var(--org);color:#000;font-weight:800;border:none;border-radius:12px;padding:13px;font-size:14px">Connect</button>'
-      + '<div id="backtogoogle" style="font-family:var(--mono);font-size:10.5px;color:var(--dim);cursor:pointer">back to Google sign-in</div>'
       + '</div>';
     const go=()=>{ const v=document.getElementById('keyin').value.trim(); if(!v)return;
       try{ localStorage.setItem('snow-key',v); }catch(e){}
       document.getElementById('loader').innerHTML='<div class="spinner"></div>';
-      load({key:v}).catch(()=>askKey()); };
+      load({key:v}).catch(()=>askKey('That key didn’t work. Check it and try again.')); };
     document.getElementById('keygo').onclick=go;
-    document.getElementById('backtogoogle').onclick=()=>signInScreen();
     document.getElementById('keyin').addEventListener('keydown',e=>{ if(e.key==='Enter')go(); });
     setTimeout(()=>document.getElementById('keyin').focus(),200);
   }
-  // try a remembered Google token, then a remembered key, else show sign-in
-  const gtok = (()=>{ try{ return localStorage.getItem('snow-gtoken'); }catch(e){ return null; } })();
-  const first = gtok ? load({token:gtok}) : (k ? load({key:k}) : Promise.reject(new Error('needs-auth')));
-  first.catch(()=> signInScreen());
+  // key-only: try a remembered key, else prompt for it
+  const first = k ? load({key:k}) : Promise.reject(new Error('needs-key'));
+  first.catch(()=> askKey());
 })();
 
 let ITEMS_BY_ID={}, VIDEOS=[], FEED_ORDER=[];
