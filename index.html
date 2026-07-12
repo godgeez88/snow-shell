@@ -340,14 +340,17 @@ let _seed=Date.now()%2147483647; function pseudo(){ _seed=(_seed*16807)%21474836
 function initials(s){ return (s||'S').replace(/^https?:\/\//,'').replace(/^www\./,'')[0].toUpperCase(); }
 
 // ---------- boot ----------
-// ---------- offline-first loader: no key, caches everything for offline use ----------
+// ---------- offline-first loader: Google-gated, caches everything for offline ----------
 const CONTENT_URL = 'https://snow-godgeez.onrender.com/content.json';
+const AUTH_URL    = 'https://snow-godgeez.onrender.com/auth';
+const IMG_BASE    = 'https://snow-godgeez.onrender.com/img/';
 const DATA_CACHE = 'snow-data-v1';
 const IMG_CACHE  = 'snow-img-v1';
-// register the offline worker (serves the app shell + images with no network)
+const GOOGLE_CLIENT_ID = '332340925825-kvkcohsqmsm8vvr7s1osonieuu1dg9r9.apps.googleusercontent.com';
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(function(){}); }
 
 (function(){
+  function tok(){ try{ return localStorage.getItem('snow-access'); }catch(e){ return null; } }
   function setWake(t){ var w=document.getElementById('wake'); if(w) w.textContent=t; }
   function showLoading(){
     document.getElementById('loader').innerHTML =
@@ -360,6 +363,11 @@ if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catc
       '<div class="empty">Couldn’t reach your library.<br><span style="font-size:10px">'+esc(msg||'')+'</span><br><br>'
       + '<span style="font-size:12px;color:var(--org)" onclick="location.reload()">tap to retry</span></div>';
   }
+  // append the on-device access token to this app's OWN private image URLs (not public ytimg)
+  function tokenizeImages(){
+    var t=tok(); if(!t||!DB||!DB.items) return;
+    DB.items.forEach(function(i){ if(i.thumb && i.thumb.indexOf(IMG_BASE)===0 && i.thumb.indexOf('?t=')<0) i.thumb += '?t='+encodeURIComponent(t); });
+  }
   async function readCache(){
     try{ var c=await caches.open(DATA_CACHE); var r=await c.match(CONTENT_URL); if(r) return await r.json(); }catch(e){}
     return null;
@@ -368,11 +376,13 @@ if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catc
     var tries=0;
     while(true){
       try{
-        var res=await fetch(CONTENT_URL,{cache:'no-store'});
+        var res=await fetch(CONTENT_URL,{cache:'no-store', headers:{authorization:'Bearer '+(tok()||'')}});
+        if(res.status===401) throw new Error('needs-auth');
         if(!res.ok) throw new Error('http '+res.status);
         try{ var c=await caches.open(DATA_CACHE); await c.put(CONTENT_URL, res.clone()); }catch(e){}
         return await res.json();
       }catch(e){
+        if(e && e.message==='needs-auth') throw e;
         tries++; if(tries>=12) throw e;
         if(withUI) setWake('Waking the server… first open can take up to a minute ('+tries+')');
         await new Promise(function(r){setTimeout(r,5000);});
@@ -380,20 +390,47 @@ if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catc
     }
   }
   function launch(data){
-    DB=data; if(!S) S=loadState(); S.authed=true; initState(); afterLoad();
+    DB=data; tokenizeImages(); if(!S) S=loadState(); S.authed=true; initState(); afterLoad();
     injectSyncBar(); offlineSync();
+  }
+  function googleScreen(msg){
+    document.getElementById('loader').innerHTML =
+      '<div style="max-width:300px;text-align:center;display:flex;flex-direction:column;gap:8px;align-items:center;padding:0 20px">'
+      + '<div class="holo" style="margin-bottom:16px">'+holo(72,true)+'</div>'
+      + '<div style="font-size:40px;font-weight:800;letter-spacing:-.045em;display:flex;align-items:center;gap:2px">sn'+holo(34,true)+'w</div>'
+      + '<div style="font-size:12.5px;color:var(--mut);margin:6px 0 24px">'+(msg||'Sign in to load everything you’re learning.')+'</div>'
+      + '<div id="gbtnwrap" style="min-height:44px;display:flex;justify-content:center"></div>'
+      + '<div style="font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:22px">amit@godgeez.com only</div>'
+      + '</div>';
+    renderGoogle();
+  }
+  function renderGoogle(){
+    if(!(window.google && google.accounts && google.accounts.id)){ return setTimeout(renderGoogle,300); }
+    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onCred });
+    google.accounts.id.renderButton(document.getElementById('gbtnwrap'), {theme:'filled_black', size:'large', shape:'pill', text:'continue_with', width:260});
+    try{ google.accounts.id.prompt(); }catch(e){}
+  }
+  async function onCred(resp){
+    showLoading(); setWake('Signing you in…');
+    try{
+      var r=await fetch(AUTH_URL,{method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({token:resp.credential})});
+      if(!r.ok) throw new Error('denied');
+      var j=await r.json(); if(!j.access) throw new Error('denied');
+      try{ localStorage.setItem('snow-access', j.access); }catch(e){}
+      launch(await fetchContent(true));
+    }catch(e){ googleScreen('That account can’t open this app. Use amit@godgeez.com.'); }
   }
   (async function boot(){
     var cached=await readCache();
-    if(cached){ launch(cached); refreshQuiet(); }              // instant + offline
-    else {
-      showLoading();
-      try{ var data=await fetchContent(true); launch(data); }  // first ever open
-      catch(e){ showError(e && e.message); }
-    }
+    if(cached){ launch(cached); refreshQuiet(); return; }     // instant + offline (already-synced device)
+    if(!tok()){ googleScreen(); return; }                      // first open on this device -> sign in
+    showLoading();
+    try{ launch(await fetchContent(true)); }
+    catch(e){ if(e && e.message==='needs-auth') googleScreen(); else showError(e && e.message); }
   })();
   async function refreshQuiet(){                                // silent update when online
-    try{ var res=await fetch(CONTENT_URL,{cache:'no-store'}); if(res.ok){ var c=await caches.open(DATA_CACHE); await c.put(CONTENT_URL,res.clone()); } }catch(e){}
+    if(!tok()) return;
+    try{ var res=await fetch(CONTENT_URL,{cache:'no-store', headers:{authorization:'Bearer '+tok()}}); if(res.ok){ var c=await caches.open(DATA_CACHE); await c.put(CONTENT_URL,res.clone()); } }catch(e){}
   }
 
   // ---- slim top progress bar: caches every thumbnail for offline viewing ----
